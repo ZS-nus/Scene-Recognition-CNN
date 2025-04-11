@@ -30,4 +30,8 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
+# Trained model files
 trained_cnn.pth
+
+# PyTorch model files
+*.pth

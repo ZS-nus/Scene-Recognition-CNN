@@ -248,7 +248,12 @@ def train(train_data_dir="./train", **kwargs):
     # 5) Create model, define loss & optimizer
     model = ImprovedCNN(num_classes=15).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    # Add to your train function before the training loop
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    )
 
     # 6) Training loop
     best_val_loss = float('inf')
@@ -330,6 +335,9 @@ def train(train_data_dir="./train", **kwargs):
               f"Val Acc: {val_accuracy:.2f}% | "
               f"Time: {minutes}m {seconds}s")
         
+        # Inside training loop, after validation
+        scheduler.step(avg_val_loss)
+        
         # Check early stopping condition
         if use_early_stopping and early_stopper(avg_val_loss):
             print(f"Early stopping triggered at epoch {epoch+1}")
@@ -404,7 +412,7 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
 
     # Rebuild same architecture & load weights
     model = ImprovedCNN(num_classes=15).to(device)
-    model.load_state_dict(torch.load(trained_cnn_path))
+    model.load_state_dict(torch.load(trained_cnn_path, weights_only=True))
     model.eval()
 
     correct = 0
