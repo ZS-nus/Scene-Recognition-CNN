@@ -1,5 +1,6 @@
 import sys
 import os
+import time  # Add this import at the top with your other imports
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,6 +9,42 @@ from torch.utils.data import DataLoader, random_split
 
 from model import ImprovedCNN, get_device
 
+
+class EarlyStopping:
+    """
+    Early stopping to prevent overfitting.
+    Stops training when validation loss doesn't improve for a specified patience.
+    
+    Args:
+        patience (int): How many epochs to wait after last improvement.
+        min_delta (float): Minimum change to qualify as improvement.
+        verbose (bool): If True, prints message when early stopping occurs.
+    """
+    def __init__(self, patience=5, min_delta=0.0, verbose=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.verbose = verbose
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+    
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            # Improvement found
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            # No improvement
+            self.counter += 1
+            if self.verbose:
+                print(f"\n EarlyStopping: No improvement for {self.counter} epochs.")
+            
+            if self.counter >= self.patience:
+                if self.verbose:
+                    print(f"\n EarlyStopping: Stopping training after {self.patience} epochs without improvement.")
+                self.early_stop = True
+                
+        return self.early_stop
 
 
 def print_progress_bar(
@@ -41,7 +78,6 @@ def print_progress_bar(
     if iteration == total:
         sys.stdout.write('\n')
         
-        
 
 
 def train(train_data_dir="./train", **kwargs):
@@ -57,12 +93,11 @@ def train(train_data_dir="./train", **kwargs):
             epochs (int): Number of epochs. Default=5
             val_split (float): Fraction for validation. Default=0.2
             model_save_path (str): Where to save the model. Default='trained_cnn.pth'
+            early_stopping (bool): Whether to use early stopping. Default=False
+            patience (int): Patience for early stopping. Default=5
     """
-    
-        # Get the best available device
+    # Get the best available device
     device = get_device()
-    
-    
     
     # 1) Hyperparameters & defaults
     batch_size = kwargs.get('batch_size', 16)
@@ -70,18 +105,44 @@ def train(train_data_dir="./train", **kwargs):
     epochs = kwargs.get('epochs', 5)
     val_split = kwargs.get('val_split', 0.2)  # e.g., 20% of images => val set
     model_save_path = kwargs.get('model_save_path', 'trained_cnn.pth')
-
-    # 2) Define transforms
-    transform = transforms.Compose([
+    
+    # Early stopping parameters
+    use_early_stopping = kwargs.get('early_stopping', False)
+    patience = kwargs.get('patience', 5)
+    
+    # Initialize early stopping if enabled
+    early_stopper = None
+    if use_early_stopping:
+        early_stopper = EarlyStopping(patience=patience)
+        print(f"Early stopping enabled with patience {patience} \n")
+    
+    # 2) Define transforms with augmentation for training
+    train_transform = transforms.Compose([
+        transforms.Resize((256, 256)),  # Resize larger than needed for random crop
+        transforms.RandomCrop(224),     # Random crop to 224x224
+        transforms.RandomHorizontalFlip(p=0.5),  # 50% chance of horizontal flip
+        transforms.RandomRotation(10),  # Small random rotations (+/- 10 degrees)
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.1),  # Color variations
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
+    
+    # Define separate transforms for validation (no augmentation)
+    val_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
     ])
     
-    
-
-
+    # Define non-augmented transform for comparison
+    basic_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
     
     # Define the mapping (subtract 1 for 0-based indexing)
     class_to_official = {
@@ -105,12 +166,10 @@ def train(train_data_dir="./train", **kwargs):
     # Load the dataset with the custom class mapping
     full_dataset = datasets.ImageFolder(
         root=train_data_dir, 
-        transform=transform,
+        transform=train_transform,  # Use augmentation transform here
         target_transform=lambda x: list(class_to_official.values()).index(x) if x in class_to_official.values() else x
     )
 
-
-    
     # Update the class_to_idx mapping to use our custom indices
     full_dataset.class_to_idx = class_to_official
     
@@ -125,11 +184,66 @@ def train(train_data_dir="./train", **kwargs):
         generator=torch.Generator().manual_seed(42)  # reproducible
     )
 
+    # After creating train_dataset and val_dataset, we need to update their transforms
+    train_dataset.dataset.transform = train_transform  # Apply augmentation to training
+    val_dataset.dataset.transform = val_transform      # No augmentation for validation
+
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
+    # Calculate effective augmented dataset size by running a few batches through both transforms
+    def estimate_augmented_size(original_dataset, augmented_transform, basic_transform, samples=100):
+        """Estimate the effective size increase from data augmentation"""
+        import numpy as np
+        
+        if samples > len(original_dataset):
+            samples = len(original_dataset)
+            
+        # Select random samples from dataset
+        indices = np.random.choice(len(original_dataset), samples, replace=False)
+        
+        total_pixel_diff = 0
+        for idx in indices:
+            img, _ = original_dataset[idx]
+            
+            # Save current transform
+            current_transform = original_dataset.transform
+            
+            # Apply basic transform
+            original_dataset.transform = basic_transform
+            basic_img, _ = original_dataset[idx]
+            
+            # Apply augmented transform
+            original_dataset.transform = augmented_transform
+            aug_img, _ = original_dataset[idx]
+            
+            # Restore original transform
+            original_dataset.transform = current_transform
+            
+            # Calculate difference between augmented and basic images
+            diff = torch.abs(aug_img - basic_img).sum().item()
+            total_pixel_diff += diff
+        
+        # Calculate average difference
+        avg_diff = total_pixel_diff / samples
+        
+        # Normalize to a percentage (higher diff = more augmentation)
+        # This is a rough estimate of "how different" the augmented images are
+        aug_effect = min(100, avg_diff * 10)  # Cap at 100% increase
+        
+        return aug_effect
+    
+    # Estimate augmentation effect
+    aug_effect = estimate_augmented_size(full_dataset, train_transform, basic_transform)
+    
+    # Calculate effective training examples
+    effective_train_size = int(train_size * (1 + aug_effect/100))
+    
+    print(f"\n Total images: {dataset_size} | Original training: {train_size}, Validation: {val_size}")
+    print(f"\n Data augmentation effectiveness: {aug_effect:.1f}% increase")
+    print(f"\n Effective training samples: ~{effective_train_size} (including augmentations) \n")
+    
     print(full_dataset.class_to_idx)
-    print(f"Total images: {dataset_size} | Training: {train_size}, Validation: {val_size}")
 
     # 5) Create model, define loss & optimizer
     model = ImprovedCNN(num_classes=15).to(device)
@@ -137,7 +251,11 @@ def train(train_data_dir="./train", **kwargs):
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # 6) Training loop
+    best_val_loss = float('inf')
+    best_model_state = None
+    
     for epoch in range(epochs):
+        epoch_start_time = time.time()  # Start timing the epoch
         model.train()
         running_loss = 0.0
 
@@ -146,7 +264,7 @@ def train(train_data_dir="./train", **kwargs):
 
         # For each batch, show a progress bar.
         for batch_idx, (images, labels) in enumerate(train_loader):
-                # Move tensors to device
+            # Move tensors to device
             images = images.to(device)
             labels = labels.to(device)
             
@@ -181,7 +299,7 @@ def train(train_data_dir="./train", **kwargs):
         total = 0
         with torch.no_grad():
             for images, labels in val_loader:
-                # Move tensors to device - this line was missing
+                # Move tensors to device
                 images = images.to(device)
                 labels = labels.to(device)
                 
@@ -195,15 +313,36 @@ def train(train_data_dir="./train", **kwargs):
 
         avg_val_loss = val_loss / len(val_loader)
         val_accuracy = 100.0 * correct / total
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_state = model.state_dict().copy()
+        
+        # Calculate epoch time
+        epoch_time = time.time() - epoch_start_time
+        minutes = int(epoch_time // 60)
+        seconds = int(epoch_time % 60)
 
-        # Print summary for the epoch
+        # Print summary for the epoch with timing information
         print(f"Train Loss: {avg_train_loss:.4f} | "
               f"Val Loss: {avg_val_loss:.4f} | "
-              f"Val Acc: {val_accuracy:.2f}%")
-
-    # 7) Save the trained model
-    torch.save(model.state_dict(), model_save_path)
-    print(f"Training complete. Model saved to: {model_save_path}")
+              f"Val Acc: {val_accuracy:.2f}% | "
+              f"Time: {minutes}m {seconds}s")
+        
+        # Check early stopping condition
+        if use_early_stopping and early_stopper(avg_val_loss):
+            print(f"Early stopping triggered at epoch {epoch+1}")
+            break
+    
+    # Save the best model instead of the last one
+    if best_model_state is not None:
+        torch.save(best_model_state, model_save_path)
+        print(f"Training complete. Best model saved to: {model_save_path}")
+    else:
+        # Fallback to the last model if somehow no best model was found
+        torch.save(model.state_dict(), model_save_path)
+        print(f"Training complete. Final model saved to: {model_save_path}")
 
 
 ###############################################################################
@@ -221,9 +360,10 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
     """
     batch_size = kwargs.get('batch_size', 16)
     
-        # Get the best available device
+    # Get the best available device
     device = get_device()
 
+    # Use the same transform as validation (no augmentation)
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -231,7 +371,7 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
                              std=[0.229, 0.224, 0.225])
     ])
     
-        # Define the mapping again
+    # Define the mapping again
     class_to_official = {
         'bedroom': 1,
         'Coast': 2,
@@ -250,14 +390,14 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
         'TallBuilding': 15
     }
     
-        # Load the dataset with the custom class mapping
+    # Load the dataset with the custom class mapping
     test_dataset = datasets.ImageFolder(
         root=test_data_dir, 
         transform=transform,
         target_transform=lambda x: list(class_to_official.values()).index(x) if x in class_to_official.values() else x
     )
     
-        # Update the class_to_idx mapping
+    # Update the class_to_idx mapping
     test_dataset.class_to_idx = class_to_official
     
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -272,7 +412,7 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
 
     with torch.no_grad():
         for images, labels in test_loader:
-            # Move tensors to device - this line was missing
+            # Move tensors to device
             images = images.to(device)
             labels = labels.to(device)
             
@@ -282,4 +422,4 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
             correct += (predicted == labels).sum().item()
 
     accuracy = 100.0 * correct / total
-    print(f"Test Accuracy: {accuracy:.2f}%")
+    print(f"\n Test Accuracy: {accuracy:.2f}%")

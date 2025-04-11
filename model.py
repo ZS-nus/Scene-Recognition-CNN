@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,7 +19,7 @@ def get_device():
         print("Using MPS (Metal Performance Shaders)")
     else:
         device = torch.device("cpu")
-        print("Using CPU")
+        print(f"Using CPU \n")
     
     return device
 
@@ -28,27 +27,33 @@ class ImprovedCNN(nn.Module):
     def __init__(self, num_classes=15):
         super(ImprovedCNN, self).__init__()
         
-        # First convolutional block
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
+        # First convolutional block - increased initial filters
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(64)
         self.pool = nn.MaxPool2d(2, 2)
         
         # Second convolutional block
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(128)
         
         # Third convolutional block
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1) 
-        self.bn3 = nn.BatchNorm2d(128)
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(256)
         
         # Fourth convolutional block
-        self.conv4 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
+        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm2d(512)
         
-        # Calculate size after 4 pooling operations (224 -> 112 -> 56 -> 28 -> 14)
-        self.fc1 = nn.Linear(256 * 14 * 14, 512)
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(512, num_classes)
+        # Fifth convolutional block (new)
+        self.conv5 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
+        self.bn5 = nn.BatchNorm2d(512)
+        
+        # Calculate size after 5 pooling operations (224 -> 112 -> 56 -> 28 -> 14 -> 7)
+        self.fc1 = nn.Linear(512 * 7 * 7, 1024)
+        self.dropout1 = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(1024, 512)
+        self.dropout2 = nn.Dropout(0.3)
+        self.fc3 = nn.Linear(512, num_classes)
 
     def forward(self, x):
         # Block 1
@@ -63,10 +68,15 @@ class ImprovedCNN(nn.Module):
         # Block 4
         x = self.pool(F.relu(self.bn4(self.conv4(x))))
         
+        # Block 5 (new)
+        x = self.pool(F.relu(self.bn5(self.conv5(x))))
+        
         # Flatten and FC layers
         x = x.view(x.size(0), -1)
         x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
+        x = self.dropout1(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout2(x)
+        x = self.fc3(x)
         
         return x
