@@ -25,7 +25,7 @@ def main():
         # Exit after training
         sys.exit(0)
     elif choice == '2':
-        test_dir = input("\nEnter path to test directory (default: ./train): ") or "./train"
+        test_dir = input("\nEnter path to test directory (default: ./test): ") or "./test"
         print(f"\nTesting model from trained_cnn.pth on images in {test_dir}...")
         test(
             test_data_dir=test_dir,

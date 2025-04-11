@@ -118,14 +118,16 @@ def train(train_data_dir="./train", **kwargs):
     
     # 2) Define transforms with augmentation for training
     train_transform = transforms.Compose([
-        transforms.Resize((256, 256)),  # Resize larger than needed for random crop
-        transforms.RandomCrop(224),     # Random crop to 224x224
-        transforms.RandomHorizontalFlip(p=0.5),  # 50% chance of horizontal flip
-        transforms.RandomRotation(10),  # Small random rotations (+/- 10 degrees)
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.1),  # Color variations
+        transforms.Resize((256, 256)),
+        transforms.RandomCrop(224),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(15),  # Increased from 10
+        transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # Add perspective
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1),
+        transforms.RandomGrayscale(p=0.1),  # Add grayscale chance
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.2))  # Add random erasing
     ])
     
     # Define separate transforms for validation (no augmentation)
