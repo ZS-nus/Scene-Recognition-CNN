@@ -14,7 +14,7 @@ def main():
         print("\nStarting model training...")
         train(
             train_data_dir="./train",
-            batch_size=64,
+            batch_size=32,
             lr=0.001,
             epochs=100,
             val_split=0.2,

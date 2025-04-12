@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
+import numpy as np
 
 from model import ImprovedCNN, get_device
 
@@ -79,6 +80,17 @@ def print_progress_bar(
         sys.stdout.write('\n')
         
 
+def mixup_data(x, y, alpha=0.2):
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(x.device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
 
 def train(train_data_dir="./train", **kwargs):
     """
@@ -117,17 +129,17 @@ def train(train_data_dir="./train", **kwargs):
         print(f"Early stopping enabled with patience {patience} \n")
     
     # 2) Define transforms with augmentation for training
+    # Enhanced data augmentation pipeline
     train_transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.RandomCrop(224),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(15),  # Increased from 10
-        transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # Add perspective
-        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1),
-        transforms.RandomGrayscale(p=0.1),  # Add grayscale chance
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(15),  # Add rotation - good for scenes that can appear at different angles
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),  # Add color variation
+        transforms.RandAugment(num_ops=2, magnitude=7),  # Slightly reduce magnitude for better balance
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.2, scale=(0.02, 0.2))  # Add random erasing
+        transforms.RandomErasing(p=0.2)  # Add random occlusion simulation
     ])
     
     # Define separate transforms for validation (no augmentation)
@@ -277,9 +289,13 @@ def train(train_data_dir="./train", **kwargs):
             
             optimizer.zero_grad()
 
+            # Apply mixup
+            images, labels_a, labels_b, lam = mixup_data(images, labels)
+            images, labels_a, labels_b = images.to(device), labels_a.to(device), labels_b.to(device)
+
             # Forward
             outputs = model(images)
-            loss = criterion(outputs, labels)
+            loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
             
             # Backward
             loss.backward()
