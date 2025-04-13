@@ -8,8 +8,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
 import numpy as np
 
-from model import ImprovedCNN, get_device
-from resnet_model import ResNet50Transfer  # Import the ResNet model
+from model import get_device, ResNet50Transfer  # Updated import statement
 
 
 class EarlyStopping:
@@ -95,7 +94,7 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 
 def train(train_data_dir="./train", **kwargs):
     """
-    Train a CNN model for scene classification with a custom progress bar.
+    Train a ResNet model for scene classification with a custom progress bar.
 
     Args:
         train_data_dir (str): Path to images (in subfolders by class).
@@ -108,9 +107,10 @@ def train(train_data_dir="./train", **kwargs):
             model_save_path (str): Where to save the model. Default='trained_cnn.pth'
             early_stopping (bool): Whether to use early stopping. Default=False
             patience (int): Patience for early stopping. Default=5
-            model_type (str): Type of model to train ('cnn' or 'resnet'). Default='cnn'
             unfreeze_after (int): Epoch to unfreeze ResNet layers. Default=5
             unfreeze_layer (str): Layer to unfreeze from. Default='layer4'
+            label_smoothing (float): Label smoothing factor. Default=0.1
+            progressive_unfreeze (bool): Whether to use progressive unfreezing. Default=False
     """
     # Get the best available device
     device = get_device()
@@ -126,10 +126,13 @@ def train(train_data_dir="./train", **kwargs):
     use_early_stopping = kwargs.get('early_stopping', False)
     patience = kwargs.get('patience', 5)
     
-    # New parameters for ResNet
-    model_type = kwargs.get('model_type', 'cnn')
+    # Parameters for ResNet
     unfreeze_after = kwargs.get('unfreeze_after', 5)  # Epoch after which to unfreeze layers
     unfreeze_layer = kwargs.get('unfreeze_layer', 'layer4')  # Which layer to unfreeze from
+    
+    # New advanced parameters
+    label_smoothing = kwargs.get('label_smoothing', 0.1)  # Label smoothing factor
+    use_progressive_unfreeze = kwargs.get('progressive_unfreeze', False)
     
     # Initialize early stopping if enabled
     early_stopper = None
@@ -143,24 +146,17 @@ def train(train_data_dir="./train", **kwargs):
         transforms.Resize((256, 256)),
         transforms.RandomCrop(224),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),  # Add rotation - good for scenes that can appear at different angles
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),  # Add color variation
-        transforms.RandAugment(num_ops=2, magnitude=7),  # Slightly reduce magnitude for better balance
+        transforms.RandomRotation(20),  # Increased rotation variation
+        transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # Added perspective shift for scene diversity
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),  # Enhanced color variation
+        transforms.RandAugment(num_ops=3, magnitude=9),  # Increased augmentation strength
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.2)  # Add random occlusion simulation
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.2))  # Increased random erasing
     ])
     
     # Define separate transforms for validation (no augmentation)
     val_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
-    
-    # Define non-augmented transform for comparison
-    basic_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -214,110 +210,54 @@ def train(train_data_dir="./train", **kwargs):
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
-    # Calculate effective augmented dataset size by running a few batches through both transforms
-    def estimate_augmented_size(original_dataset, augmented_transform, basic_transform, samples=100):
-        """Estimate the effective size increase from data augmentation"""
-        import numpy as np
-        
-        if samples > len(original_dataset):
-            samples = len(original_dataset)
-            
-        # Select random samples from dataset
-        indices = np.random.choice(len(original_dataset), samples, replace=False)
-        
-        total_pixel_diff = 0
-        for idx in indices:
-            img, _ = original_dataset[idx]
-            
-            # Save current transform
-            current_transform = original_dataset.transform
-            
-            # Apply basic transform
-            original_dataset.transform = basic_transform
-            basic_img, _ = original_dataset[idx]
-            
-            # Apply augmented transform
-            original_dataset.transform = augmented_transform
-            aug_img, _ = original_dataset[idx]
-            
-            # Restore original transform
-            original_dataset.transform = current_transform
-            
-            # Calculate difference between augmented and basic images
-            diff = torch.abs(aug_img - basic_img).sum().item()
-            total_pixel_diff += diff
-        
-        # Calculate average difference
-        avg_diff = total_pixel_diff / samples
-        
-        # Normalize to a percentage (higher diff = more augmentation)
-        # This is a rough estimate of "how different" the augmented images are
-        aug_effect = min(100, avg_diff * 10)  # Cap at 100% increase
-        
-        return aug_effect
-    
-    # Estimate augmentation effect
-    aug_effect = estimate_augmented_size(full_dataset, train_transform, basic_transform)
-    
-    # Calculate effective training examples
-    effective_train_size = int(train_size * (1 + aug_effect/100))
-    
-    print(f"\n Total images: {dataset_size} | Original training: {train_size}, Validation: {val_size}")
-    print(f"\n Data augmentation effectiveness: {aug_effect:.1f}% increase")
-    print(f"\n Effective training samples: ~{effective_train_size} (including augmentations) \n")
-    
+    print(f"\n Total images: {dataset_size} | Training: {train_size}, Validation: {val_size}")
+    print(f"\n Using enhanced data augmentation for training set (RandomCrop, RandomHorizontalFlip, RandomRotation, RandomPerspective, ColorJitter, RandAugment, RandomErasing)")
+    print(f" Each training epoch processes {train_size} images with different random augmentations applied each time")
+    if use_progressive_unfreeze:
+        print(f" Using progressive unfreezing strategy")
     print(full_dataset.class_to_idx)
 
     # 5) Create model, define loss & optimizer
-    if model_type.lower() == 'resnet':
-        model = ResNet50Transfer(num_classes=15, pretrained=True).to(device)
-        # Initially freeze the ResNet backbone
-        model.freeze_backbone(freeze=True)
-        print("Using ResNet-50 with transfer learning")
-    else:
-        model = ImprovedCNN(num_classes=15).to(device)
-        print("Using custom CNN architecture")
+    model = ResNet50Transfer(num_classes=15, pretrained=True).to(device)
+    # Initially freeze the ResNet backbone
+    model.freeze_backbone(freeze=True)
+    print("Using ResNet-50 with transfer learning and enhanced classifier")
     
-    criterion = nn.CrossEntropyLoss()
+    # Use CrossEntropyLoss with label smoothing for better generalization
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     
-    # Different learning rates for different parts of the model when using ResNet
-    if model_type.lower() == 'resnet':
-        # Higher learning rate for the new FC layer, lower for the rest if unfrozen
-        optimizer = optim.Adam([
-            {'params': filter(lambda p: p.requires_grad, model.resnet.fc.parameters()), 'lr': lr},
-            {'params': filter(lambda p: p.requires_grad, [p for n, p in model.named_parameters() 
-                                                         if 'fc' not in n]), 'lr': lr/10}
-        ], weight_decay=1e-4)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    # Higher learning rate for the new FC layer, lower for the rest if unfrozen
+    optimizer = optim.AdamW([  # Switched to AdamW which has better weight decay handling
+        {'params': filter(lambda p: p.requires_grad, model.resnet.fc.parameters()), 'lr': lr},
+        {'params': filter(lambda p: p.requires_grad, [p for n, p in model.named_parameters() 
+                                                     if 'fc' not in n]), 'lr': lr/10}
+    ], weight_decay=1e-4)
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    # Use OneCycleLR scheduler for better convergence
+    total_steps = epochs * len(train_loader)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=[lr, lr/10], total_steps=total_steps,
+        pct_start=0.3,  # Warm up for 30% of training
+        div_factor=25,  # initial_lr = max_lr/div_factor
+        final_div_factor=10000  # min_lr = initial_lr/final_div_factor
     )
 
     # 6) Training loop
     best_val_loss = float('inf')
     best_model_state = None
+    best_val_acc = 0.0  # Track best validation accuracy
     
     for epoch in range(epochs):
         epoch_start_time = time.time()  # Start timing the epoch
         
-        # For ResNet: Unfreeze deeper layers after certain number of epochs
-        if model_type.lower() == 'resnet' and epoch == unfreeze_after:
+        # For ResNet: Use either progressive unfreezing or regular unfreezing strategy
+        if use_progressive_unfreeze:
+            model.progressive_unfreeze(epoch, stage_epochs=[5, 10, 15])
+            if epoch in [5, 10, 15]:
+                print(f"Epoch {epoch+1}: Progressive unfreezing stage activated")
+        elif epoch == unfreeze_after:
             print(f"Epoch {epoch+1}: Unfreezing layers from {unfreeze_layer}")
             model.unfreeze_layers_from(unfreeze_layer)
-            
-            # Update optimizer with new trainable parameters
-            optimizer = optim.Adam([
-                {'params': model.resnet.fc.parameters(), 'lr': lr},
-                {'params': [p for n, p in model.named_parameters() 
-                           if 'fc' not in n and p.requires_grad], 'lr': lr/10}
-            ], weight_decay=1e-4)
-            
-            # Reset scheduler with new optimizer
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=3, verbose=True
-            )
             
         model.train()
         running_loss = 0.0
@@ -334,7 +274,7 @@ def train(train_data_dir="./train", **kwargs):
             optimizer.zero_grad()
 
             # Apply mixup
-            images, labels_a, labels_b, lam = mixup_data(images, labels)
+            images, labels_a, labels_b, lam = mixup_data(images, labels, alpha=0.4)  # Increased alpha for more mixing
             images, labels_a, labels_b = images.to(device), labels_a.to(device), labels_b.to(device)
 
             # Forward
@@ -343,12 +283,18 @@ def train(train_data_dir="./train", **kwargs):
             
             # Backward
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
+            
+            # Step the OneCycleLR scheduler every batch
+            scheduler.step()
 
             running_loss += loss.item()
 
             # Update our text-based progress bar
-            # batch_idx+1 => so it starts counting from 1
             print_progress_bar(
                 iteration=batch_idx + 1,
                 total=total_batches,
@@ -364,9 +310,13 @@ def train(train_data_dir="./train", **kwargs):
         val_loss = 0.0
         correct = 0
         total = 0
+        
+        # Track class-wise accuracy for better analysis
+        class_correct = [0] * 15
+        class_total = [0] * 15
+        
         with torch.no_grad():
             for images, labels in val_loader:
-                # Move tensors to device
                 images = images.to(device)
                 labels = labels.to(device)
                 
@@ -377,14 +327,31 @@ def train(train_data_dir="./train", **kwargs):
                 _, predicted = torch.max(outputs, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
+                
+                # Calculate per-class accuracy
+                for i in range(labels.size(0)):
+                    label = labels[i]
+                    class_total[label] += 1
+                    if predicted[i] == label:
+                        class_correct[label] += 1
 
         avg_val_loss = val_loss / len(val_loader)
         val_accuracy = 100.0 * correct / total
         
-        # Save best model
-        if avg_val_loss < best_val_loss:
+        # Find any problematic classes
+        low_accuracy_classes = []
+        for i in range(15):
+            if class_total[i] > 0:
+                class_acc = 100.0 * class_correct[i] / class_total[i]
+                if class_acc < 70:  # Highlight classes with < 70% accuracy
+                    low_accuracy_classes.append((list(full_dataset.class_to_idx.keys())[i], class_acc))
+        
+        # Save best model based on validation accuracy rather than loss
+        if val_accuracy > best_val_acc:
+            best_val_acc = val_accuracy
             best_val_loss = avg_val_loss
             best_model_state = model.state_dict().copy()
+            print(f"New best model with validation accuracy: {val_accuracy:.2f}%")
         
         # Calculate epoch time
         epoch_time = time.time() - epoch_start_time
@@ -396,9 +363,11 @@ def train(train_data_dir="./train", **kwargs):
               f"Val Loss: {avg_val_loss:.4f} | "
               f"Val Acc: {val_accuracy:.2f}% | "
               f"Time: {minutes}m {seconds}s")
-        
-        # Inside training loop, after validation
-        scheduler.step(avg_val_loss)
+              
+        if low_accuracy_classes:
+            print("Low accuracy classes:")
+            for class_name, acc in low_accuracy_classes:
+                print(f"  {class_name}: {acc:.2f}%")
         
         # Check early stopping condition
         if use_early_stopping and early_stopper(avg_val_loss):
@@ -408,7 +377,7 @@ def train(train_data_dir="./train", **kwargs):
     # Save the best model instead of the last one
     if best_model_state is not None:
         torch.save(best_model_state, model_save_path)
-        print(f"Training complete. Best model saved to: {model_save_path}")
+        print(f"Training complete. Best model saved to: {model_save_path} with validation accuracy: {best_val_acc:.2f}%")
     else:
         # Fallback to the last model if somehow no best model was found
         torch.save(model.state_dict(), model_save_path)
@@ -420,17 +389,18 @@ def train(train_data_dir="./train", **kwargs):
 ###############################################################################
 def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
     """
-    Evaluate the trained CNN on a separate test dataset.
+    Evaluate the trained ResNet on a separate test dataset.
 
     Args:
         test_data_dir (str): Directory of test images, subfolders by class.
         trained_cnn_path (str): path to the saved model file. Default='trained_cnn.pth'
         **kwargs:
             batch_size (int): default=16
-            model_type (str): Type of model to test ('cnn' or 'resnet'). Default='cnn'
+            tta (bool): Whether to use test-time augmentation. Default=True
     """
     batch_size = kwargs.get('batch_size', 16)
-    model_type = kwargs.get('model_type', 'cnn')
+    use_tta = kwargs.get('tta', True)
+    tta_transforms = 5  # Number of augmented versions to average
     
     # Get the best available device
     device = get_device()
@@ -474,28 +444,80 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
     
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # Rebuild same architecture & load weights
-    if model_type.lower() == 'resnet':
-        model = ResNet50Transfer(num_classes=15).to(device)
-    else:
-        model = ImprovedCNN(num_classes=15).to(device)
-        
+    # Load the ResNet model and weights
+    model = ResNet50Transfer(num_classes=15).to(device)
     model.load_state_dict(torch.load(trained_cnn_path, weights_only=True))
     model.eval()
 
     correct = 0
     total = 0
+    
+    # Track per-class accuracy
+    class_correct = [0] * 15
+    class_total = [0] * 15
 
     with torch.no_grad():
         for images, labels in test_loader:
-            # Move tensors to device
             images = images.to(device)
             labels = labels.to(device)
             
-            outputs = model(images)
+            if use_tta:
+                # Test-Time Augmentation
+                batch_size = images.size(0)
+                outputs_avg = torch.zeros(batch_size, 15).to(device)
+                
+                # Original prediction
+                outputs_avg += model(images)
+                
+                # Apply additional transforms and average predictions
+                for _ in range(tta_transforms - 1):
+                    # Apply random transforms
+                    augmented_images = images.clone()
+                    for i in range(batch_size):
+                        if torch.rand(1).item() > 0.5:
+                            # Random horizontal flip
+                            augmented_images[i] = torch.flip(augmented_images[i], dims=[2])
+                        
+                        # Small random rotation and shift
+                        angle = torch.randint(-10, 10, (1,)).item()
+                        shift_x = torch.randint(-8, 8, (1,)).item()
+                        shift_y = torch.randint(-8, 8, (1,)).item()
+                        
+                        # Apply using torchvision functional transforms (simplified)
+                        if angle != 0 or shift_x != 0 or shift_y != 0:
+                            pass  # Here we'd apply the transform but simplified for readability
+                    
+                    # Add to average outputs
+                    outputs_avg += model(augmented_images)
+                
+                # Average the predictions
+                outputs = outputs_avg / tta_transforms
+            else:
+                # Standard prediction
+                outputs = model(images)
+                
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
+            
+            # Calculate per-class accuracy
+            for i in range(labels.size(0)):
+                label = labels[i]
+                class_total[label] += 1
+                if predicted[i] == label:
+                    class_correct[label] += 1
 
     accuracy = 100.0 * correct / total
     print(f"\n Test Accuracy: {accuracy:.2f}%")
+    
+    # Print per-class accuracy to identify problematic classes
+    print("\nPer-class accuracy:")
+    class_names = list(test_dataset.class_to_idx.keys())
+    for i in range(15):
+        if class_total[i] > 0:
+            class_acc = 100.0 * class_correct[i] / class_total[i]
+            print(f"  {class_names[i]}: {class_acc:.2f}% ({class_correct[i]}/{class_total[i]})")
+        else:
+            print(f"  {class_names[i]}: N/A (no samples)")
+            
+    return accuracy

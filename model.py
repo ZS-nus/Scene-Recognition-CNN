@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models  # Added for ResNet50Transfer
 
 print(f"Is CUDA available: {torch.cuda.is_available()}")
 print(f"CUDA device count: {torch.cuda.device_count()}")
@@ -26,60 +27,85 @@ def get_device():
     
     return device
 
-class ImprovedCNN(nn.Module):
-    def __init__(self, num_classes=15):
-        super(ImprovedCNN, self).__init__()
+class ResNet50Transfer(nn.Module):
+    def __init__(self, num_classes=15, pretrained=True):
+        """
+        Initialize ResNet50 model with transfer learning.
         
-        # First convolutional block - increased initial filters
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.pool = nn.MaxPool2d(2, 2)
+        Args:
+            num_classes (int): Number of output classes
+            pretrained (bool): Whether to use pretrained weights
+        """
+        super(ResNet50Transfer, self).__init__()
         
-        # Second convolutional block
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
+        # Load pretrained ResNet-50 model
+        self.resnet = models.resnet50(weights='IMAGENET1K_V1' if pretrained else None)
         
-        # Third convolutional block
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(256)
+        # Replace the final fully connected layer with a more complex classifier
+        in_features = self.resnet.fc.in_features
+        self.resnet.fc = nn.Sequential(
+            nn.Dropout(0.4),  # Increased dropout
+            nn.Linear(in_features, 1024),  # Larger intermediate layer
+            nn.BatchNorm1d(1024),  # Added batch normalization
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(1024, 512),  # Added one more layer
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, num_classes)
+        )
         
-        # Fourth convolutional block
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(512)
-        
-        # Fifth convolutional block (new)
-        self.conv5 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.bn5 = nn.BatchNorm2d(512)
-        
-        # Calculate size after 5 pooling operations (224 -> 112 -> 56 -> 28 -> 14 -> 7)
-        self.fc1 = nn.Linear(512 * 7 * 7, 1024)
-        self.dropout1 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(1024, 512)
-        self.dropout2 = nn.Dropout(0.3)
-        self.fc3 = nn.Linear(512, num_classes)
-
     def forward(self, x):
-        # Block 1
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))
+        return self.resnet(x)
         
-        # Block 2
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))
+    def freeze_backbone(self, freeze=True):
+        """
+        Freeze or unfreeze the backbone ResNet layers
         
-        # Block 3
-        x = self.pool(F.relu(self.bn3(self.conv3(x))))
+        Args:
+            freeze (bool): Whether to freeze layers (True) or make them trainable (False)
+        """
+        # Freeze/unfreeze all parameters except final fully connected layer
+        for name, param in self.resnet.named_parameters():
+            if "fc" not in name:  # Exclude the final FC layer
+                param.requires_grad = not freeze
+                
+    def unfreeze_layers_from(self, layer_name):
+        """
+        Unfreeze ResNet layers starting from a specified layer
         
-        # Block 4
-        x = self.pool(F.relu(self.bn4(self.conv4(x))))
+        Args:
+            layer_name (str): Layer to start unfreezing from (e.g., 'layer4')
+        """
+        # First freeze everything
+        self.freeze_backbone(True)
         
-        # Block 5 (new)
-        x = self.pool(F.relu(self.bn5(self.conv5(x))))
+        # Then unfreeze from the specified layer
+        unfreezing = False
+        for name, param in self.resnet.named_parameters():
+            if layer_name in name:
+                unfreezing = True
+            if unfreezing:
+                param.requires_grad = True
+                
+    def progressive_unfreeze(self, current_epoch, stage_epochs=[5, 10, 15]):
+        """
+        Progressively unfreeze more layers as training progresses
         
-        # Flatten and FC layers
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc1(x))
-        x = self.dropout1(x)
-        x = F.relu(self.fc2(x))
-        x = self.dropout2(x)
-        x = self.fc3(x)
-        
-        return x
+        Args:
+            current_epoch (int): Current training epoch
+            stage_epochs (list): Epochs at which to unfreeze more layers
+        """
+        if current_epoch < stage_epochs[0]:
+            # Only FC layer is trainable
+            self.freeze_backbone(True)
+        elif current_epoch < stage_epochs[1]:
+            # Unfreeze layer4
+            self.unfreeze_layers_from("layer4")
+        elif current_epoch < stage_epochs[2]:
+            # Unfreeze layer3 too
+            self.unfreeze_layers_from("layer3")
+        else:
+            # Unfreeze layer2 as well
+            self.unfreeze_layers_from("layer2")
