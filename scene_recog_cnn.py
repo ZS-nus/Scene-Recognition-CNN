@@ -1,6 +1,6 @@
 import sys
 import os
-import time  # Add this import at the top with your other imports
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, random_split
 import numpy as np
 
 from model import ImprovedCNN, get_device
+from resnet_model import ResNet50Transfer  # Import the ResNet model
 
 
 class EarlyStopping:
@@ -107,6 +108,9 @@ def train(train_data_dir="./train", **kwargs):
             model_save_path (str): Where to save the model. Default='trained_cnn.pth'
             early_stopping (bool): Whether to use early stopping. Default=False
             patience (int): Patience for early stopping. Default=5
+            model_type (str): Type of model to train ('cnn' or 'resnet'). Default='cnn'
+            unfreeze_after (int): Epoch to unfreeze ResNet layers. Default=5
+            unfreeze_layer (str): Layer to unfreeze from. Default='layer4'
     """
     # Get the best available device
     device = get_device()
@@ -115,12 +119,17 @@ def train(train_data_dir="./train", **kwargs):
     batch_size = kwargs.get('batch_size', 16)
     lr = kwargs.get('lr', 0.001)
     epochs = kwargs.get('epochs', 5)
-    val_split = kwargs.get('val_split', 0.2)  # e.g., 20% of images => val set
+    val_split = kwargs.get('val_split', 0.2)
     model_save_path = kwargs.get('model_save_path', 'trained_cnn.pth')
     
     # Early stopping parameters
     use_early_stopping = kwargs.get('early_stopping', False)
     patience = kwargs.get('patience', 5)
+    
+    # New parameters for ResNet
+    model_type = kwargs.get('model_type', 'cnn')
+    unfreeze_after = kwargs.get('unfreeze_after', 5)  # Epoch after which to unfreeze layers
+    unfreeze_layer = kwargs.get('unfreeze_layer', 'layer4')  # Which layer to unfreeze from
     
     # Initialize early stopping if enabled
     early_stopper = None
@@ -260,11 +269,28 @@ def train(train_data_dir="./train", **kwargs):
     print(full_dataset.class_to_idx)
 
     # 5) Create model, define loss & optimizer
-    model = ImprovedCNN(num_classes=15).to(device)
+    if model_type.lower() == 'resnet':
+        model = ResNet50Transfer(num_classes=15, pretrained=True).to(device)
+        # Initially freeze the ResNet backbone
+        model.freeze_backbone(freeze=True)
+        print("Using ResNet-50 with transfer learning")
+    else:
+        model = ImprovedCNN(num_classes=15).to(device)
+        print("Using custom CNN architecture")
+    
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    
+    # Different learning rates for different parts of the model when using ResNet
+    if model_type.lower() == 'resnet':
+        # Higher learning rate for the new FC layer, lower for the rest if unfrozen
+        optimizer = optim.Adam([
+            {'params': filter(lambda p: p.requires_grad, model.resnet.fc.parameters()), 'lr': lr},
+            {'params': filter(lambda p: p.requires_grad, [p for n, p in model.named_parameters() 
+                                                         if 'fc' not in n]), 'lr': lr/10}
+        ], weight_decay=1e-4)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
-    # Add to your train function before the training loop
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=3, verbose=True
     )
@@ -275,6 +301,24 @@ def train(train_data_dir="./train", **kwargs):
     
     for epoch in range(epochs):
         epoch_start_time = time.time()  # Start timing the epoch
+        
+        # For ResNet: Unfreeze deeper layers after certain number of epochs
+        if model_type.lower() == 'resnet' and epoch == unfreeze_after:
+            print(f"Epoch {epoch+1}: Unfreezing layers from {unfreeze_layer}")
+            model.unfreeze_layers_from(unfreeze_layer)
+            
+            # Update optimizer with new trainable parameters
+            optimizer = optim.Adam([
+                {'params': model.resnet.fc.parameters(), 'lr': lr},
+                {'params': [p for n, p in model.named_parameters() 
+                           if 'fc' not in n and p.requires_grad], 'lr': lr/10}
+            ], weight_decay=1e-4)
+            
+            # Reset scheduler with new optimizer
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=3, verbose=True
+            )
+            
         model.train()
         running_loss = 0.0
 
@@ -383,8 +427,10 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
         trained_cnn_path (str): path to the saved model file. Default='trained_cnn.pth'
         **kwargs:
             batch_size (int): default=16
+            model_type (str): Type of model to test ('cnn' or 'resnet'). Default='cnn'
     """
     batch_size = kwargs.get('batch_size', 16)
+    model_type = kwargs.get('model_type', 'cnn')
     
     # Get the best available device
     device = get_device()
@@ -429,7 +475,11 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # Rebuild same architecture & load weights
-    model = ImprovedCNN(num_classes=15).to(device)
+    if model_type.lower() == 'resnet':
+        model = ResNet50Transfer(num_classes=15).to(device)
+    else:
+        model = ImprovedCNN(num_classes=15).to(device)
+        
     model.load_state_dict(torch.load(trained_cnn_path, weights_only=True))
     model.eval()
 
