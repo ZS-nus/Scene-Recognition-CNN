@@ -2,16 +2,17 @@ import os
 import shutil
 from pathlib import Path
 import random
+import re
 
-def create_test_set(scene15_dir, train_dir, test_dir, test_ratio=0.3):
+def create_test_set(scene15_dir, train_dir, test_dir):
     """
-    Create a test set with images from Scene-15 that are not in the train folder.
+    Create a test set with ALL images from Scene-15 that are not in the train folder.
+    Files are compared by their numeric identifiers in the filename.
     
     Args:
         scene15_dir: Path to the Scene-15 directory
         train_dir: Path to the training directory
         test_dir: Path to create the test directory
-        test_ratio: Ratio of non-train images to use for testing (default 0.3)
     """
     # Ensure the test directory exists
     os.makedirs(test_dir, exist_ok=True)
@@ -45,6 +46,11 @@ def create_test_set(scene15_dir, train_dir, test_dir, test_ratio=0.3):
     
     print(f"Creating test set from {scene15_dir}")
     
+    def extract_image_id(filename):
+        """Extract numeric identifier from filename."""
+        match = re.search(r'\d+', filename)
+        return int(match.group()) if match else None
+    
     # Process each category folder
     for scene15_folder, train_folder in folder_mapping.items():
         scene15_path = os.path.join(scene15_dir, scene15_folder)
@@ -59,26 +65,23 @@ def create_test_set(scene15_dir, train_dir, test_dir, test_ratio=0.3):
         # Create test category folder
         os.makedirs(test_path, exist_ok=True)
         
-        # Get all image filenames from Scene-15 folder
-        scene15_images = set(os.listdir(scene15_path))
+        # Get all images from Scene-15 folder with their numeric IDs
+        scene15_files = os.listdir(scene15_path)
+        scene15_images = {f: extract_image_id(f) for f in scene15_files}
         
-        # Get all image filenames from train folder (if it exists)
-        train_images = set()
+        # Get all images from train folder with their numeric IDs
+        train_images = {}
         if os.path.exists(train_path):
-            train_images = set(os.listdir(train_path))
+            train_files = os.listdir(train_path)
+            train_images = {f: extract_image_id(f) for f in train_files}
         
-        # Find images in Scene-15 that are not in the train folder
-        unique_images = list(scene15_images - train_images)
-        
-        # Randomly select a subset based on test_ratio
-        num_test_images = int(len(unique_images) * test_ratio)
-        if num_test_images > 0:
-            selected_images = random.sample(unique_images, num_test_images)
-        else:
-            selected_images = unique_images
+        # Find ALL images in Scene-15 that have IDs not in the train folder
+        train_ids = set(id for id in train_images.values() if id is not None)
+        test_images = [f for f, id in scene15_images.items() 
+                      if id is not None and id not in train_ids]
             
-        # Copy selected images to test folder
-        for image in selected_images:
+        # Copy all non-training images to test folder
+        for image in test_images:
             src = os.path.join(scene15_path, image)
             dst = os.path.join(test_path, image)
             shutil.copy2(src, dst)
@@ -86,14 +89,14 @@ def create_test_set(scene15_dir, train_dir, test_dir, test_ratio=0.3):
         # Update statistics
         stats["total_scene15_images"] += len(scene15_images)
         stats["total_train_images"] += len(train_images)
-        stats["total_test_images"] += len(selected_images)
+        stats["total_test_images"] += len(test_images)
         stats["categories"][train_folder] = {
             "scene15_count": len(scene15_images),
             "train_count": len(train_images),
-            "test_count": len(selected_images)
+            "test_count": len(test_images)
         }
         
-        print(f"  {train_folder}: {len(selected_images)} test images created")
+        print(f"  {train_folder}: {len(test_images)} test images created")
     
     # Print summary statistics
     print("\nTest Set Creation Summary:")
@@ -113,15 +116,7 @@ if __name__ == "__main__":
     train_dir = "train"
     test_dir = "test"
     
-    # Get user input for test_ratio
-    try:
-        test_ratio = float(input("Enter ratio of non-training images to use for test set (0.0-1.0, default 0.3): ") or 0.3)
-        test_ratio = max(0.0, min(1.0, test_ratio))  # Clamp between 0 and 1
-    except ValueError:
-        print("Invalid input, using default ratio of 0.3")
-        test_ratio = 0.3
-    
-    # Create the test set
-    create_test_set(scene15_dir, train_dir, test_dir, test_ratio)
+    # Create the test set with all non-training images
+    create_test_set(scene15_dir, train_dir, test_dir)
     
     print(f"\nTest set created successfully at {test_dir}")
