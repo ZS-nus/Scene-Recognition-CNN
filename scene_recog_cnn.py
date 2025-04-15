@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
 import numpy as np
 
-from model import get_device, ResNet50Transfer  # Updated import statement
+from model import get_device, ResNet101Transfer  # Changed from ResNet50Transfer to ResNet101Transfer
 
 
 class EarlyStopping:
@@ -165,21 +165,21 @@ def train(train_data_dir="./train", **kwargs):
     
     # Define the mapping (subtract 1 for 0-based indexing)
     class_to_official = {
-        'bedroom': 1,
-        'Coast': 2,
-        'Forest': 3,
-        'Highway': 4,
-        'industrial': 5,
-        'Insidecity': 6,
-        'kitchen': 7,
-        'livingroom': 8,
-        'Mountain': 9,
-        'Office': 10,
-        'OpenCountry': 11,
-        'store': 12,
-        'Street': 13,
-        'Suburb': 14,
-        'TallBuilding': 15
+        'bedroom': 0,
+        'Coast': 1,
+        'Forest': 2,
+        'Highway': 3,
+        'industrial': 4,
+        'Insidecity': 5,
+        'kitchen': 6,
+        'livingroom': 7,
+        'Mountain': 8,
+        'Office': 9,
+        'OpenCountry': 10,
+        'store': 11,
+        'Street': 12,
+        'Suburb': 13,
+        'TallBuilding': 14
     }
     
     # Load the dataset with the custom class mapping
@@ -218,10 +218,10 @@ def train(train_data_dir="./train", **kwargs):
     print(full_dataset.class_to_idx)
 
     # 5) Create model, define loss & optimizer
-    model = ResNet50Transfer(num_classes=15, pretrained=True).to(device)
+    model = ResNet101Transfer(num_classes=15, pretrained=True).to(device)
     # Initially freeze the ResNet backbone
     model.freeze_backbone(freeze=True)
-    print("Using ResNet-50 with transfer learning and enhanced classifier")
+    print("Using ResNet-101 with transfer learning and enhanced classifier")
     
     # Use CrossEntropyLoss with label smoothing for better generalization
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
@@ -338,14 +338,6 @@ def train(train_data_dir="./train", **kwargs):
         avg_val_loss = val_loss / len(val_loader)
         val_accuracy = 100.0 * correct / total
         
-        # Find any problematic classes
-        low_accuracy_classes = []
-        for i in range(15):
-            if class_total[i] > 0:
-                class_acc = 100.0 * class_correct[i] / class_total[i]
-                if class_acc < 70:  # Highlight classes with < 70% accuracy
-                    low_accuracy_classes.append((list(full_dataset.class_to_idx.keys())[i], class_acc))
-        
         # Save best model based on validation accuracy rather than loss
         if val_accuracy > best_val_acc:
             best_val_acc = val_accuracy
@@ -363,11 +355,6 @@ def train(train_data_dir="./train", **kwargs):
               f"Val Loss: {avg_val_loss:.4f} | "
               f"Val Acc: {val_accuracy:.2f}% | "
               f"Time: {minutes}m {seconds}s")
-              
-        if low_accuracy_classes:
-            print("Low accuracy classes:")
-            for class_name, acc in low_accuracy_classes:
-                print(f"  {class_name}: {acc:.2f}%")
         
         # Check early stopping condition
         if use_early_stopping and early_stopper(avg_val_loss):
@@ -415,21 +402,21 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
     
     # Define the mapping again
     class_to_official = {
-        'bedroom': 1,
-        'Coast': 2,
-        'Forest': 3,
-        'Highway': 4,
-        'industrial': 5,
-        'Insidecity': 6,
-        'kitchen': 7,
-        'livingroom': 8,
-        'Mountain': 9,
-        'Office': 10,
-        'OpenCountry': 11,
-        'store': 12,
-        'Street': 13,
-        'Suburb': 14,
-        'TallBuilding': 15
+        'bedroom': 0,
+        'Coast': 1,
+        'Forest': 2,
+        'Highway': 3,
+        'industrial': 4,
+        'Insidecity': 5,
+        'kitchen': 6,
+        'livingroom': 7,
+        'Mountain': 8,
+        'Office': 9,
+        'OpenCountry': 10,
+        'store': 11,
+        'Street': 12,
+        'Suburb': 13,
+        'TallBuilding': 14
     }
     
     # Load the dataset with the custom class mapping
@@ -441,11 +428,19 @@ def test(test_data_dir, trained_cnn_path="trained_cnn.pth", **kwargs):
     
     # Update the class_to_idx mapping
     test_dataset.class_to_idx = class_to_official
-    
+
+    # Print number of images per category in test set
+    import collections
+    category_counts = collections.Counter(test_dataset.targets)
+    class_names = list(test_dataset.class_to_idx.keys())
+    print("\nTest set image count per category:")
+    for idx, class_name in enumerate(class_names):
+        print(f"  {class_name}: {category_counts[idx]}")
+
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # Load the ResNet model and weights
-    model = ResNet50Transfer(num_classes=15).to(device)
+    model = ResNet101Transfer(num_classes=15).to(device)
     model.load_state_dict(torch.load(trained_cnn_path, weights_only=True))
     model.eval()
 

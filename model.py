@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models  # Added for ResNet50Transfer
+import torchvision.models as models  # Added for ResNet101Transfer
 
 print(f"Is CUDA available: {torch.cuda.is_available()}")
 print(f"CUDA device count: {torch.cuda.device_count()}")
@@ -27,19 +27,19 @@ def get_device():
     
     return device
 
-class ResNet50Transfer(nn.Module):
+class ResNet101Transfer(nn.Module):
     def __init__(self, num_classes=15, pretrained=True):
         """
-        Initialize ResNet50 model with transfer learning.
+        Initialize ResNet101 model with transfer learning.
         
         Args:
             num_classes (int): Number of output classes
             pretrained (bool): Whether to use pretrained weights
         """
-        super(ResNet50Transfer, self).__init__()
+        super(ResNet101Transfer, self).__init__()
         
-        # Load pretrained ResNet-50 model
-        self.resnet = models.resnet50(weights='IMAGENET1K_V1' if pretrained else None)
+        # Load pretrained ResNet-101 model
+        self.resnet = models.resnet101(weights='IMAGENET1K_V1' if pretrained else None)
         
         # Replace the final fully connected layer with a more complex classifier
         in_features = self.resnet.fc.in_features
