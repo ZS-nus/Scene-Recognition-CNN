@@ -3,9 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models  # Added for ResNet101Transfer
 
-print(f"Is CUDA available: {torch.cuda.is_available()}")
-print(f"CUDA device count: {torch.cuda.device_count()}")
-
 def get_device():
     """
     Check and return the best available device for PyTorch.
@@ -15,15 +12,21 @@ def get_device():
     Returns:
         torch.device: The best available device
     """
+    # Add the print statements here
+    print(f"Checking devices...")
+    print(f"  Is CUDA available: {torch.cuda.is_available()}")
+    print(f"  CUDA device count: {torch.cuda.device_count()}")
+    print(f"  Is MPS available: {hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()}")
+    
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        print(f"Using CUDA: {torch.cuda.get_device_name(0)}")
+        print(f"--> Using CUDA: {torch.cuda.get_device_name(0)}")
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device = torch.device("mps")
-        print("Using MPS (Metal Performance Shaders)")
+        print("--> Using MPS (Metal Performance Shaders)")
     else:
         device = torch.device("cpu")
-        print(f"Using CPU \n")
+        print(f"--> Using CPU")
     
     return device
 

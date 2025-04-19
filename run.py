@@ -11,7 +11,7 @@ def main():
     choice = input("\nEnter your choice (1-3): ")
     
     if choice == '1':
-        print("\nStarting ResNet-50 model training...")
+        print("\nStarting ResNet-101 model training...")
         train(
             train_data_dir="./train",
             batch_size=32,  # Increased from 6 to 32 for better gradient estimates
