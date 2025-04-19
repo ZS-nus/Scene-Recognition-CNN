@@ -1,114 +1,106 @@
-import torch
+# model.py
+import os, torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models  # Added for ResNet101Transfer
+import torchvision.models as models
+import warnings, torch
 
-def get_device():
+warnings.filterwarnings(
+    "ignore",
+    message=r"You are using `torch\.load` with `weights_only=False`.*",
+    category=UserWarning,
+    module=r"torch\.serialization"
+)
+
+
+# ──────────────────────────────────────────────────────────────────
+def get_device() -> torch.device:
     """
-    Check and return the best available device for PyTorch.
-    Will use CUDA if available, then MPS (Metal Performance Shaders for Mac), 
-    otherwise CPU.
-    
-    Returns:
-        torch.device: The best available device
+    Select the best available backend.
+
+    Priority
+    --------
+    1. CUDA (NVIDIA GPUs)
+    2. Apple M‑Series / Metal Performance Shaders (MPS)
+    3. CPU
     """
-    # Add the print statements here
-    print(f"Checking devices...")
-    print(f"  Is CUDA available: {torch.cuda.is_available()}")
-    print(f"  CUDA device count: {torch.cuda.device_count()}")
-    print(f"  Is MPS available: {hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()}")
-    
     if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"--> Using CUDA: {torch.cuda.get_device_name(0)}")
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("--> Using MPS (Metal Performance Shaders)")
-    else:
-        device = torch.device("cpu")
-        print(f"--> Using CPU")
-    
-    return device
+        name = torch.cuda.get_device_name(0)
+        print(f"--> Using CUDA   : {name}")
+        return torch.device("cuda")
 
-class ResNet101Transfer(nn.Module):
-    def __init__(self, num_classes=15, pretrained=True):
-        """
-        Initialize ResNet101 model with transfer learning.
-        
-        Args:
-            num_classes (int): Number of output classes
-            pretrained (bool): Whether to use pretrained weights
-        """
-        super(ResNet101Transfer, self).__init__()
-        
-        # Load pretrained ResNet-101 model
-        self.resnet = models.resnet101(weights='IMAGENET1K_V1' if pretrained else None)
-        
-        # Replace the final fully connected layer with a more complex classifier
-        in_features = self.resnet.fc.in_features
-        self.resnet.fc = nn.Sequential(
-            nn.Dropout(0.4),  # Increased dropout
-            nn.Linear(in_features, 1024),  # Larger intermediate layer
-            nn.BatchNorm1d(1024),  # Added batch normalization
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(1024, 512),  # Added one more layer
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, num_classes)
-        )
-        
-    def forward(self, x):
-        return self.resnet(x)
-        
-    def freeze_backbone(self, freeze=True):
-        """
-        Freeze or unfreeze the backbone ResNet layers
-        
-        Args:
-            freeze (bool): Whether to freeze layers (True) or make them trainable (False)
-        """
-        # Freeze/unfreeze all parameters except final fully connected layer
-        for name, param in self.resnet.named_parameters():
-            if "fc" not in name:  # Exclude the final FC layer
-                param.requires_grad = not freeze
-                
-    def unfreeze_layers_from(self, layer_name):
-        """
-        Unfreeze ResNet layers starting from a specified layer
-        
-        Args:
-            layer_name (str): Layer to start unfreezing from (e.g., 'layer4')
-        """
-        # First freeze everything
-        self.freeze_backbone(True)
-        
-        # Then unfreeze from the specified layer
-        unfreezing = False
-        for name, param in self.resnet.named_parameters():
-            if layer_name in name:
-                unfreezing = True
-            if unfreezing:
-                param.requires_grad = True
-                
-    def progressive_unfreeze(self, current_epoch, stage_epochs=[5, 10, 15]):
-        """
-        Progressively unfreeze more layers as training progresses
-        
-        Args:
-            current_epoch (int): Current training epoch
-            stage_epochs (list): Epochs at which to unfreeze more layers
-        """
-        if current_epoch < stage_epochs[0]:
-            # Only FC layer is trainable
-            self.freeze_backbone(True)
-        elif current_epoch < stage_epochs[1]:
-            # Unfreeze layer4
-            self.unfreeze_layers_from("layer4")
-        elif current_epoch < stage_epochs[2]:
-            # Unfreeze layer3 too
-            self.unfreeze_layers_from("layer3")
+    # MPS is available only in PyTorch ≥ 1.12 on macOS 12.3+
+    mps_ok = getattr(torch.backends, "mps", None)
+    if mps_ok is not None and torch.backends.mps.is_available():
+        print("--> Using MPS    : Apple Metal backend")
+        return torch.device("mps")
+
+    print("--> Using CPU    : no GPU backend found")
+    return torch.device("cpu")
+
+# ──────────────────────────────────────────────────────────────────
+
+class ResNet50Places365(nn.Module):
+    """
+    ResNet‑50 backbone with optional Places365 weights and a *single* FC head.
+    Provides utilities for progressive layer unfreezing.
+    """
+    def __init__(self, num_classes=15,
+                 weights_path="resnet50_places365.pth.tar",
+                 use_places=True):
+        super().__init__()
+
+        # Base architecture
+        self.backbone = models.resnet50(weights=None)
+        if use_places and os.path.exists(weights_path):
+            print(f"Loading Places365 weights from {weights_path}")
+            try:
+                ckpt = torch.load(weights_path, map_location="cpu", weights_only=True)
+            except TypeError:
+                ckpt = torch.load(weights_path, map_location="cpu")
+            state = ckpt.get("state_dict", ckpt)
+            state = {k.replace("module.", ""): v for k, v in state.items()}
+            # Temp fc to 365 to match ckpt
+            in_f = self.backbone.fc.in_features
+            self.backbone.fc = nn.Linear(in_f, 365)
+            self.backbone.load_state_dict(state, strict=False)
         else:
-            # Unfreeze layer2 as well
-            self.unfreeze_layers_from("layer2")
+            print("❕ Places weights missing ‑ using random init.")
+
+        # Replace classifier (head) – smaller, harder to over‑fit
+        in_f = self.backbone.fc.in_features
+        self.backbone.fc = nn.Linear(in_f, num_classes)
+
+        # Freeze everything by default
+        self.freeze_backbone()
+
+    # ── forward ────────────────────────────────────────────────
+    def forward(self, x):   return self.backbone(x)
+
+    # ── freezing helpers ───────────────────────────────────────
+    def freeze_backbone(self):
+        for n, p in self.backbone.named_parameters():
+            if "fc" not in n: p.requires_grad = False
+
+    def unfreeze_layer_group(self, group="layer4"):
+        """Unfreeze backbone layers *from* the specified group upward."""
+        unfreeze = False
+        for n, p in self.backbone.named_parameters():
+            if group in n: unfreeze = True
+            if unfreeze and "fc" not in n: p.requires_grad = True
+
+    def progressive_unfreeze(self, epoch, schedule=(0, 3, 6)):
+        """
+        Epoch‑based schedule:
+          0‑2  : train head only
+          3‑5  : unfreeze layer4
+          6‑∞  : unfreeze layer3+
+        """
+        if epoch < schedule[1]:
+            self.freeze_backbone()
+        elif epoch < schedule[2]:
+            self.freeze_backbone()
+            self.unfreeze_layer_group("layer4")
+        else:
+            # unfreeze layer3,4
+            self.freeze_backbone()
+            self.unfreeze_layer_group("layer3")
