@@ -3,6 +3,8 @@ import os, torch
 import torch.nn as nn
 import torchvision.models as models
 import warnings, torch
+import urllib.request
+import sys
 
 warnings.filterwarnings(
     "ignore",
@@ -20,7 +22,7 @@ def get_device() -> torch.device:
     Priority
     --------
     1. CUDA (NVIDIA GPUs)
-    2. Apple M‑Series / Metal Performance Shaders (MPS)
+    2. Apple M‑Series / Metal Performance Shaders (MPS)
     3. CPU
     """
     if torch.cuda.is_available():
@@ -28,14 +30,38 @@ def get_device() -> torch.device:
         print(f"--> Using CUDA   : {name}")
         return torch.device("cuda")
 
-    # MPS is available only in PyTorch ≥ 1.12 on macOS 12.3+
+    # MPS is available only in PyTorch ≥ 1.12 on macOS 12.3+
     mps_ok = getattr(torch.backends, "mps", None)
     if mps_ok is not None and torch.backends.mps.is_available():
-        print("--> Using MPS    : Apple Metal backend")
+        print("--> Using MPS    : Apple Metal backend")
         return torch.device("mps")
 
     print("--> Using CPU    : no GPU backend found")
     return torch.device("cpu")
+
+# ──────────────────────────────────────────────────────────────────
+def download_places365_weights(weights_path="resnet50_places365.pth.tar"):
+    """
+    Download Places365 weights if they don't exist locally.
+    Returns True if weights are available (either existed or downloaded successfully).
+    """
+    if os.path.exists(weights_path):
+        return True
+    
+    print(f"Places365 weights not found. Downloading to {weights_path}...")
+    url = "http://places2.csail.mit.edu/models_places365/resnet50_places365.pth.tar"
+    try:
+        def report_progress(count, block_size, total_size):
+            percent = int(count * block_size * 100 / total_size)
+            sys.stdout.write(f"\rDownloading: {percent}% complete")
+            sys.stdout.flush()
+            
+        urllib.request.urlretrieve(url, weights_path, reporthook=report_progress)
+        print("\nDownload complete!")
+        return True
+    except Exception as e:
+        print(f"\nError downloading Places365 weights: {e}")
+        return False
 
 # ──────────────────────────────────────────────────────────────────
 
@@ -51,20 +77,26 @@ class ResNet50Places365(nn.Module):
 
         # Base architecture
         self.backbone = models.resnet50(weights=None)
-        if use_places and os.path.exists(weights_path):
-            print(f"Loading Places365 weights from {weights_path}")
-            try:
-                ckpt = torch.load(weights_path, map_location="cpu", weights_only=True)
-            except TypeError:
-                ckpt = torch.load(weights_path, map_location="cpu")
-            state = ckpt.get("state_dict", ckpt)
-            state = {k.replace("module.", ""): v for k, v in state.items()}
-            # Temp fc to 365 to match ckpt
-            in_f = self.backbone.fc.in_features
-            self.backbone.fc = nn.Linear(in_f, 365)
-            self.backbone.load_state_dict(state, strict=False)
+        if use_places:
+            # Try to download weights if they don't exist
+            weights_available = download_places365_weights(weights_path)
+            
+            if weights_available:
+                print(f"Loading Places365 weights from {weights_path}")
+                try:
+                    ckpt = torch.load(weights_path, map_location="cpu", weights_only=True)
+                except TypeError:
+                    ckpt = torch.load(weights_path, map_location="cpu")
+                state = ckpt.get("state_dict", ckpt)
+                state = {k.replace("module.", ""): v for k, v in state.items()}
+                # Temp fc to 365 to match ckpt
+                in_f = self.backbone.fc.in_features
+                self.backbone.fc = nn.Linear(in_f, 365)
+                self.backbone.load_state_dict(state, strict=False)
+            else:
+                print("❕ Places weights missing ‑ using random init.")
         else:
-            print("❕ Places weights missing ‑ using random init.")
+            print("❕ Places weights disabled ‑ using random init.")
 
         # Replace classifier (head) – smaller, harder to over‑fit
         in_f = self.backbone.fc.in_features

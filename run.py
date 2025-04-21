@@ -13,7 +13,7 @@ def main():
     if choice == '1':
         print("\nStarting model training...")
         train(train_data_dir="./train",
-              epochs=5, bs=32,
+              epochs=50, bs=32,
               lr_head=1e-3, lr_backbone=1e-4,
               save_path="trained_cnn.pth",
               weights_path="resnet50_places365.pth.tar")
