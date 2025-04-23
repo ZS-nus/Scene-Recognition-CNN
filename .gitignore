@@ -8,6 +8,10 @@ dist/
 build/
 *.egg-info/
 
+hw3-A0298838B-A0240690J/
+*.zip
+
+
 # Virtual environments
 venv/
 env/
@@ -34,3 +38,4 @@ trained_cnn.pth
 
 # PyTorch model files
 # *.pth
+
